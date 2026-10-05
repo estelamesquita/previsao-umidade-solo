@@ -17,11 +17,17 @@ olhar o R²** — ele por si só não diz se o modelo serve.
 ```
 coleta_open_meteo.py     coleta horária/diária + ETo (Hargreaves e Penman-Monteith)
 treinar_modelo_solo.py   dataset supervisionado, treino, avaliação, export joblib
+controle_irrigacao.py    controlador PID e Fuzzy: setpoint + sensor -> pulso do atuador
 teste_vazamento.py       testes de causalidade das features (roda offline)
+teste_controle.py        testes do controlador com simulador de solo (roda offline)
 apresentacao.html        deck de 14 slides (abra no navegador; F = tela cheia, N = notas)
 modelos_final/           bundle de +24h, predições do holdout e resumo das métricas
 requirements.txt
 ```
+
+O fluxo completo: a coleta calcula a **ETo**, o modelo prevê a **umidade futura**
+e dela sai o **setpoint**, e o controlador converte setpoint + leitura do sensor
+na **duração do pulso** da válvula.
 
 O bundle de **+12h não está versionado**: são 85 MB (Random Forest com 400
 árvores), acima do limite prático do GitHub. Regenere-o com o comando de treino
@@ -150,6 +156,81 @@ Se o relatório imprimir que o modelo não agrega nem nos eventos, não coloque 
 produção.
 
 ---
+
+## Controle do atuador
+
+`controle_irrigacao.py` fecha a malha: recebe a umidade do sensor e o setpoint
+dinâmico, devolve a duração do pulso em segundos e o duty cycle PWM.
+
+```python
+from controle_irrigacao import Atuador, ControladorPID, LimitesSeguranca
+
+atuador = Atuador(vazao_lph=400.0, area_m2=50.0, eficiencia=0.85)
+ctrl = ControladorPID(atuador, LimitesSeguranca(
+    capacidade_campo_mm=122.6, ponto_murcha_mm=71.8))
+
+d = ctrl.atualizar(umidade_mm=88.0, setpoint_mm=96.0)
+if d.irrigar:
+    acionar_valvula(segundos=d.pulso_s)     # ou PWM: d.duty
+```
+
+Tudo em **milímetros de lâmina**, a mesma unidade da ETo e da chuva (1 mm =
+1 L/m²). A conversão para tempo fica isolada em `Atuador`, que guarda vazão,
+área e eficiência — trocar o emissor não mexe nos ganhos.
+
+### Três razões para um PID de livro-texto falhar aqui
+
+**O solo já é um integrador.** A água se acumula; a planta não é um processo
+auto-regulado. Ação integral forte sobre um processo integrador oscila, então
+`ki` entra pequeno e só para corrigir erro sistemático (emissor entupido,
+vazão real abaixo da nominal).
+
+**O tempo morto é grande.** Infiltração e redistribuição levam de minutos a
+horas até o sensor registrar a água. Um controlador que ignora isso segue
+acionando enquanto espera. Tratado pela trava pós-irrigação e pelo termo de
+**água em trânsito**, que desconta do erro o que já foi aplicado mas ainda não
+foi lido — um preditor de Smith simplificado. O efeito, medido em simulação:
+
+| | pico de umidade | água aplicada |
+|---|---|---|
+| sem o termo de trânsito | 121,1 mm (quase na cc) | 40,0 mm |
+| **com o termo** | **95,1 mm** | **18,2 mm** |
+
+Mesma meta, 2,2× menos água e sem encharcamento.
+
+**O atuador é unidirecional.** Dá para adicionar água, não para remover. A
+saturação em zero é permanente enquanto o solo estiver acima da meta, o que
+torna o anti-windup obrigatório. A derivada é calculada sobre a **medida**,
+nunca sobre o erro — o setpoint vem do modelo e muda sozinho, e derivada do
+erro transformaria cada atualização num pico.
+
+### Salvaguardas
+
+Banda morta, trava pós-irrigação, cota diária, pulso mínimo e máximo do
+atuador, e teto na capacidade de campo (água acima dela percola e leva
+nutriente junto — irrigar além disso é perda irreversível). Toda recusa vem
+com o motivo em `Decisao.motivo`, porque controlador sem observabilidade não
+se depura em campo.
+
+### Fuzzy como alternativa
+
+`ControladorFuzzy` implementa o mesmo contrato com 15 regras Mamdani sobre
+déficit relativo e tendência da umidade. A vantagem é expressar o conhecimento
+agronômico direto ("déficit alto e solo secando rápido → pulso longo") sem
+sintonizar ganhos; a desvantagem é não garantir erro nulo em regime. Nos testes
+os dois convergem (erro final 0,93 mm no PID, 0,40 mm no fuzzy).
+
+### Testes
+
+```bash
+python teste_controle.py
+```
+
+71 asserções, sem rede. Inclui um simulador de balanço hídrico com as duas
+propriedades que tornam o processo difícil: tempo morto na infiltração e
+drenagem irreversível acima da capacidade de campo. Verifica convergência,
+ausência de overshoot, anti-windup sob saturação, derivada sem chute de
+setpoint, e o comportamento diante de chuva.
 
 ## Rigor temporal
 
