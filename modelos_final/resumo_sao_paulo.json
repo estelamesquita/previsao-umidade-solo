@@ -1,0 +1,45 @@
+{
+  "local": {
+    "latitude": -23.5505,
+    "longitude": -46.6333,
+    "altitude_m": 0.0,
+    "timezone": "auto",
+    "nome": "sao_paulo"
+  },
+  "fonte": "archive",
+  "limites_hidricos": {
+    "capacidade_campo_mm": 122.57000000000001,
+    "ponto_murcha_mm": 71.82,
+    "agua_disponivel_total_mm": 50.750000000000014
+  },
+  "periodo": {
+    "inicio": "2023-10-01",
+    "fim": "2026-09-29"
+  },
+  "resultados": [
+    {
+      "horizonte_h": 12,
+      "modelo": "random_forest",
+      "formulacao": "delta",
+      "rmse_mm": 2.2757,
+      "mae_mm": 1.4092,
+      "r2": 0.889,
+      "skill_vs_persistencia": 0.06,
+      "skill_decil_superior": 0.0865,
+      "escala_calibracao": 0.4477,
+      "bundle": "solo_sao_paulo_h12.joblib"
+    },
+    {
+      "horizonte_h": 24,
+      "modelo": "hist_gradient_boosting",
+      "formulacao": "delta",
+      "rmse_mm": 3.0188,
+      "mae_mm": 1.9393,
+      "r2": 0.8044,
+      "skill_vs_persistencia": 0.0887,
+      "skill_decil_superior": 0.0901,
+      "escala_calibracao": 0.344,
+      "bundle": "solo_sao_paulo_h24.joblib"
+    }
+  ]
+}

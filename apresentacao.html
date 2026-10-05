@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Previsão de Umidade do Solo</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@300..700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --dark:#16233A; --ink:#1B2433; --paper:#FAF9F6; --paper2:#EFEDE7;
+    --body:#4A5260; --mute:#737D8C;
+    --amber:#B04A14; --amber-lt:#D98A5B;
+    --teal:#1A6354; --sky:#BFD8D5; --steel:#8FA3AD;
+    --serif:'Source Serif 4', Georgia, serif;
+    --sans:'IBM Plex Sans', Arial, Helvetica, sans-serif;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  html,body{height:100%; background:#0E1626; overflow:hidden}
+  body{font-family:var(--sans)}
+
+  /* origem no canto + offsets em px: translate(-50%,-50%) nao escala o
+     deslocamento junto com o scale e joga o slide para fora da tela */
+  #stage{position:fixed; left:0; top:0; width:1600px; height:900px;
+         transform-origin:0 0}
+  .slide{position:absolute; inset:0; width:1600px; height:900px;
+         padding:62px 88px; display:none; flex-direction:column;
+         background:var(--paper); color:var(--ink); overflow:hidden}
+  .slide.on{display:flex}
+  .slide aside{display:none}   /* notas: so no painel do N e na impressao nunca */
+
+  h1{font-family:var(--serif); font-size:92px; font-weight:400; line-height:1.04; letter-spacing:-1px}
+  h2{font-family:var(--serif); font-size:52px; font-weight:400; line-height:1.1; letter-spacing:-.5px}
+  h3{font-size:24px; font-weight:600; letter-spacing:.4px}
+  p{font-size:25px; line-height:1.4; color:var(--body)}
+  .lead{font-size:29px; line-height:1.38}
+  .eyebrow{font-size:22px; letter-spacing:3px; text-transform:uppercase;
+           color:var(--amber); font-weight:500}
+  .label{font-size:21px; letter-spacing:1.6px; text-transform:uppercase;
+         color:var(--mute); font-weight:500}
+  .num{font-family:var(--serif); font-size:84px; font-weight:400; line-height:1;
+       font-variant-numeric:tabular-nums; letter-spacing:-2px}
+  .mono{font-family:'Courier New', monospace; font-variant-numeric:tabular-nums}
+  b{font-weight:600; color:var(--ink)}
+  .bad{color:var(--amber)} .good{color:var(--teal)}
+
+  .dark{background:var(--dark); color:var(--sky)}
+  .dark h1,.dark h2{color:var(--paper)}
+  .dark p{color:var(--sky)} .dark h3{color:var(--paper)}
+  .dark .eyebrow{color:var(--amber-lt)} .dark .label{color:var(--steel)}
+  .dark .num{color:var(--paper)}
+  .tint{background:var(--paper2)}
+
+  .head{display:flex; flex-direction:column; gap:10px; flex:none}
+  .body-area{flex:1; display:flex; flex-direction:column; justify-content:center; gap:22px}
+  .row{display:flex; gap:18px}
+  .col{flex:1; display:flex; flex-direction:column; gap:10px}
+  .card{background:#fff; border:1px solid #E2E0D8; border-radius:14px; padding:22px 26px;
+        display:flex; flex-direction:column; gap:8px}
+  .dark .card{background:#1E2D47; border-color:#2C3F5E}
+  /* enfase e semantica repintadas para o fundo escuro, senao somem */
+  .dark b{color:#FAF9F6}
+  .dark td.k{color:#FAF9F6}
+  .dark .good{color:#7FC9B4}
+  .dark .bad{color:var(--amber-lt)}
+  .dark .mono{color:var(--sky)}
+  .card.flag{border-left:4px solid var(--amber)}
+  .card.ok{border-left:4px solid var(--teal)}
+  .spacer{flex:1}
+
+  table{width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums}
+  th{font-size:21px; font-weight:600; text-transform:uppercase; letter-spacing:1.2px;
+     text-align:left; padding:11px 14px; border-bottom:2px solid var(--ink); color:var(--ink)}
+  td{font-size:24px; padding:12px 14px; border-bottom:1px solid #DFDDD5; color:var(--body)}
+  td.k{color:var(--ink); font-weight:500}
+  tr.hi td{background:#F4EFE8; color:var(--ink); font-weight:500}
+  .dark th{color:var(--paper); border-bottom-color:var(--sky)}
+  .dark td{color:var(--sky); border-bottom-color:#2C3F5E}
+
+  pre{font-family:'Courier New', monospace; font-size:21px; line-height:1.5;
+      background:var(--dark); color:var(--sky); padding:20px 26px; border-radius:12px;
+      white-space:pre; overflow:hidden}
+  .dark pre{background:#0E1626}
+  pre .c{color:var(--amber-lt)} pre .g{color:#7FC9B4} pre .d{color:var(--steel)}
+
+  .flowbox{flex:1; background:#fff; border:1px solid #E2E0D8; border-radius:14px;
+           padding:24px 20px; display:flex; flex-direction:column; gap:8px; text-align:center}
+  .arrow{align-self:center; color:var(--amber); font-size:34px; font-weight:600; padding:0 2px}
+
+  .foot{flex:none; display:flex; justify-content:space-between; align-items:baseline;
+        padding-top:14px; font-size:19px; color:var(--mute); letter-spacing:.5px}
+  .dark .foot{color:var(--steel)}
+
+  #hud{position:fixed; right:18px; bottom:14px; z-index:30; font-size:13px;
+       color:#6D7A90; letter-spacing:1.4px; font-family:var(--sans)}
+  #notes{position:fixed; left:0; right:0; bottom:0; max-height:42vh; overflow:auto;
+         background:#0B1220; color:#C9D6DF; border-top:2px solid var(--amber);
+         padding:20px 26px; font-size:15px; line-height:1.6; display:none; z-index:40;
+         white-space:pre-wrap}
+  #notes.on{display:block}
+  #notes b{color:#fff}
+
+  @media print{
+    @page{size:1600px 900px; margin:0}
+    html,body{overflow:visible; background:#fff; height:auto}
+    #stage{position:static; width:1600px; height:auto; transform:none}
+    .slide{position:static; display:flex !important; page-break-after:always;
+           width:1600px; height:900px}
+    #hud,#notes{display:none !important}
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+
+<!-- 1 ───────────────────────────────── capa -->
+<section class="slide dark on" style="justify-content:space-between">
+  <p class="eyebrow">Big Data aplicado · Agrometeorologia</p>
+  <div style="display:flex; flex-direction:column; gap:34px">
+    <h1>Previsão de umidade do solo<br>a 12 e 24 horas</h1>
+    <p class="lead" style="max-width:1190px">Evapotranspiração de referência pela FAO-56 e aprendizado de
+      máquina sobre séries horárias da Open-Meteo</p>
+  </div>
+  <div class="row">
+    <div class="col" style="border-left:3px solid var(--amber-lt); padding-left:26px">
+      <h3>Dados</h3><p style="font-size:25px">26.280 horas · 3 anos de ERA5</p></div>
+    <div class="col" style="border-left:3px solid var(--amber-lt); padding-left:26px">
+      <h3>Modelos</h3><p style="font-size:25px">Random Forest · XGBoost · HistGB</p></div>
+    <div class="col" style="border-left:3px solid var(--amber-lt); padding-left:26px">
+      <h3>Autoria</h3><p style="font-size:25px">[Seu nome] · [Disciplina]</p></div>
+  </div>
+  <aside>Abertura, 30 segundos.
+
+"Este trabalho prevê quanta água o solo terá nas próximas 12 e 24 horas, usando dados meteorológicos públicos e gratuitos. A aplicação é decisão de irrigação."
+
+NÃO entre em detalhe de modelo agora. O arco da apresentação é outro: construí um modelo, ele parecia bom, era inútil, e eu descobri por quê. Esse é o conteúdo.
+
+TROQUE os placeholders [Seu nome] e [Disciplina] antes de apresentar.</aside>
+</section>
+
+<!-- 2 ───────────────────────────────── problema -->
+<section class="slide">
+  <div class="head">
+    <p class="eyebrow">O problema</p>
+    <h2>O solo é um reservatório com entrada e saída</h2>
+  </div>
+  <div class="body-area">
+    <div class="row">
+      <div class="card ok"><h3>Entrada</h3>
+        <p>Precipitação, em mm. Medida direta, horária.</p></div>
+      <div class="card flag"><h3>Saída</h3>
+        <p>Evapotranspiração de referência (ETo): a demanda que a atmosfera
+           impõe, em mm. Precisa ser <b>calculada</b>.</p></div>
+      <div class="card"><h3>Estoque</h3>
+        <p>Água na zona de raízes, em mm. É o que se quer prever.</p></div>
+    </div>
+    <p class="lead">Se a ETo acumulada supera a chuva, o estoque cai e abre-se o
+      <b>déficit hídrico</b> — o momento de irrigar. Prever o estoque 12 a 24 h
+      à frente é antecipar essa decisão.</p>
+  </div>
+  <div class="foot"><span>São Paulo · 14 dias · 56,8 mm de chuva contra 52,0 mm de ETo</span><span>2</span></div>
+  <aside>Comece pela física, não pelo código. Isso mostra que você entendeu o domínio e não só aplicou sklearn em dados arbitrários.
+
+"O solo é um reservatório. A chuva enche, a atmosfera esvazia. A taxa de esvaziamento é a evapotranspiração de referência, e ela não vem medida — tem que ser calculada a partir de temperatura, umidade, vento e radiação."
+
+Se ele perguntar o que é ETo: é a evapotranspiração de uma cultura de referência padronizada (grama, 12 cm, albedo 0,23) — serve de denominador comum para comparar demanda atmosférica entre locais e datas.</aside>
+</section>
+
+<!-- 3 ───────────────────────────────── pipeline -->
+<section class="slide tint">
+  <div class="head">
+    <p class="eyebrow">Arquitetura</p>
+    <h2>Pipeline em três estágios</h2>
+  </div>
+  <div class="body-area">
+    <div class="row" style="align-items:stretch">
+      <div class="flowbox"><h3>1 · Coleta</h3>
+        <p style="font-size:23px">Open-Meteo horária.<br>Retry com backoff,<br>fatiamento em blocos</p></div>
+      <div class="arrow">→</div>
+      <div class="flowbox"><h3>2 · ETo</h3>
+        <p style="font-size:23px">Hargreaves-Samani<br>e Penman-Monteith<br>(FAO-56)</p></div>
+      <div class="arrow">→</div>
+      <div class="flowbox"><h3>3 · Features</h3>
+        <p style="font-size:23px">63 colunas<br>estritamente causais<br>(acumulados, lags)</p></div>
+      <div class="arrow">→</div>
+      <div class="flowbox"><h3>4 · Modelo</h3>
+        <p style="font-size:23px">3 candidatos,<br>CV temporal,<br>export joblib</p></div>
+    </div>
+    <div class="row">
+      <div class="card"><h3>Escala</h3>
+        <p>26.280 registros horários em 4 requisições fatiadas. O fatiamento é o
+           gancho para paralelizar: um bloco por worker.</p></div>
+      <div class="card"><h3>Reprodutibilidade</h3>
+        <p>O <span class="mono">.joblib</span> carrega modelo, nomes <i>e ordem</i> das features,
+           esquema de camadas, limites hídricos e versões de biblioteca.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>API gratuita, sem chave · dados ERA5 e ICON</span><span>3</span></div>
+  <aside>30 segundos por caixa, no máximo. O professor vai querer chegar no modelo.
+
+Ponto a destacar se houver tempo: salvar só o estimador é o erro clássico. Sem a ordem das features e sem a formulação do alvo, quem consome o modelo erra por ~90 mm silenciosamente. O bundle carrega o contrato inteiro.</aside>
+</section>
+
+<!-- 4 ───────────────────────────────── eto -->
+<section class="slide">
+  <div class="head">
+    <p class="eyebrow">Estágio 2</p>
+    <h2>Duas equações, uma para validar a outra</h2>
+  </div>
+  <div class="body-area">
+    <div class="row">
+      <div class="card flag"><h3>Hargreaves-Samani (1985)</h3>
+        <p class="mono" style="font-size:24px; color:var(--ink)">ETo = 0,0023 · (Tmédia + 17,8)<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;· √(Tmáx − Tmín) · Ra</p>
+        <p>A <b>simplificada</b> da FAO-56: só temperatura e latitude. A amplitude
+           térmica entra como proxy da radiação solar.</p></div>
+      <div class="card ok"><h3>Penman-Monteith FAO-56</h3>
+        <p>O método padrão. Usa radiação medida, umidade relativa e vento
+           corrigido de 10 m para 2 m pelo perfil logarítmico.</p>
+        <p>Serve aqui como <b>referência de validação</b> da implementação.</p></div>
+    </div>
+    <div class="card" style="border-left:4px solid var(--teal)">
+      <h3>Verificação cruzada</h3>
+      <p class="lead">Desvio médio entre os dois métodos: <b class="good">0,44 mm/dia</b>.
+        Contra a ETo que a própria Open-Meteo calcula, a minha implementação de
+        Penman-Monteith difere em <b class="good">0,15 mm/dia</b> — o viés
+        esperado por eu usar vento médio diário onde a API integra hora a hora.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Ra = radiação extraterrestre, calculada da latitude e do dia do ano</span><span>4</span></div>
+  <aside>Este slide existe para provar que a implementação está correta, não por capricho.
+
+"Implementei as duas: a simplificada, que era o requisito, e a completa, para validar. Elas concordam em 0,44 mm/dia, e a minha Penman-Monteith bate com a da própria API em 0,15 mm."
+
+Se ele perguntar por que o desvio não é zero: uso a média diária do vento, a API integra horária. É viés de agregação, não erro de fórmula. Essa resposta mostra que você sabe de onde vem a diferença.</aside>
+</section>
+
+<!-- 5 ───────────────────────────────── alvo -->
+<section class="slide tint">
+  <div class="head">
+    <p class="eyebrow">Definição do alvo</p>
+    <h2>Água em milímetros, não em fração volumétrica</h2>
+  </div>
+  <div class="body-area">
+    <div class="card">
+      <p class="lead mono" style="color:var(--ink)">água_zona_raiz_mm = Σ ( θ<sub>i</sub> × espessura<sub>i</sub> )</p>
+      <p>Somando as camadas de 0–7 cm e 7–28 cm do ERA5, com θ em m³/m³ e
+         espessura em mm. Resultado na <b>mesma unidade</b> da ETo e da chuva.</p>
+    </div>
+    <div class="row">
+      <div class="card"><h3>Déficit hídrico</h3>
+        <p class="mono" style="color:var(--ink)">cc − água</p>
+        <p>Capacidade de campo (p95) e ponto de murcha (p02) estimados por
+           percentil da série e gravados no bundle.</p></div>
+      <div class="card"><h3>Perfil 0–28 cm</h3>
+        <p><b>280 mm</b> de profundidade efetiva, com <b>50,8 mm</b> de água
+           disponível entre murcha e capacidade de campo.</p></div>
+      <div class="card"><h3>Por que em mm</h3>
+        <p>Deixa o alvo diretamente comparável com a ETo e a precipitação —
+           balanço hídrico fechado na mesma escala.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>θ = umidade volumétrica · cc = capacidade de campo</span><span>5</span></div>
+  <aside>Decisão de engenharia que vale mencionar: escolher mm em vez de m³/m³ permite somar e subtrair com chuva e ETo diretamente. É o que torna o balanço hídrico legível.
+
+Os percentis p95/p02 são uma aproximação — capacidade de campo e ponto de murcha "de verdade" se medem em laboratório por curva de retenção. Diga isso antes de ser perguntado: mostra que você sabe o que está aproximando.</aside>
+</section>
+
+<!-- 6 ───────────────────────────────── a armadilha -->
+<section class="slide dark">
+  <div class="head">
+    <p class="eyebrow">O resultado que quase me enganou</p>
+    <h2>Um modelo com R² de 0,775 e inútil</h2>
+  </div>
+  <div class="body-area">
+    <div class="row" style="align-items:stretch">
+      <div class="card" style="flex:1; border-left:4px solid var(--steel)">
+        <p class="label">Métrica convencional</p>
+        <p class="num">0,775</p>
+        <p>R² no holdout. Parece um resultado aceitável para um trabalho.</p>
+      </div>
+      <div class="card" style="flex:1; border-left:4px solid var(--amber-lt)">
+        <p class="label">Contra a baseline</p>
+        <p class="num bad" style="color:var(--amber-lt)">−0,286</p>
+        <p><i>Skill score</i> contra persistência: o modelo é <b>pior que repetir
+          o valor atual</b>.</p>
+      </div>
+    </div>
+    <div class="card">
+      <p class="lead">Umidade do solo é fortemente autocorrelacionada: em 12 h ela
+        muda pouco. <b>Qualquer coisa que copie a entrada acerta ~88%.</b>
+        O R² não distingue aprender de copiar.</p>
+    </div>
+    <p class="mono" style="font-size:24px; color:var(--amber-lt)">skill = 1 − MSE<sub>modelo</sub> / MSE<sub>baseline</sub>&nbsp;&nbsp;&nbsp;(≤ 0 → não serve)</p>
+  </div>
+  <div class="foot"><span>Baseline de persistência: ŷ(t+h) = y(t)</span><span>6</span></div>
+  <aside>ESTE É O MOMENTO MAIS FORTE DA APRESENTAÇÃO. Vá devagar aqui.
+
+"Meu primeiro modelo deu R² de 0,775. Se eu tivesse parado aí, teria entregue um trabalho com um número aparentemente bom. Mas eu comparei contra a coisa mais burra possível — repetir o valor atual — e descobri que o modelo era PIOR que isso."
+
+Deixe a frase no ar: R² alto não significa modelo útil.
+
+Se quiser mostrar ao vivo, rode:
+.venv\Scripts\python.exe treinar_modelo_solo.py --lat -23.5505 --lon -46.6333 --nome demo_falha --anos 1 --horizontes 12 --formulacao nivel --sem-calibracao --saida .\demo_falha
+
+Leva ~35 s e imprime [REPROVADO] na tela.</aside>
+</section>
+
+<!-- 7 ───────────────────────────────── diagnóstico -->
+<section class="slide">
+  <div class="head">
+    <p class="eyebrow">Diagnóstico</p>
+    <h2>A importância das features entregou a causa</h2>
+  </div>
+  <div class="body-area">
+    <table>
+      <tr><th style="width:46%">Feature</th><th style="width:27%">Perda de RMSE ao permutar</th><th style="width:27%">Leitura</th></tr>
+      <tr class="hi"><td class="k mono">agua_atual_mm</td><td class="k">3,4148 mm</td><td class="k">o próprio valor de entrada</td></tr>
+      <tr><td class="mono">agua_media6h_mm</td><td>0,2054 mm</td><td>17× menos</td></tr>
+      <tr><td class="mono">chuva_acum6h_mm</td><td>0,1856 mm</td><td>18× menos</td></tr>
+      <tr><td class="mono">chuva_acum168h_mm</td><td>0,1485 mm</td><td>23× menos</td></tr>
+    </table>
+    <div class="row">
+      <div class="card flag"><h3>O que estava acontecendo</h3>
+        <p>O modelo gastava quase toda a capacidade para <b>reproduzir a própria
+           entrada</b>. Prever o nível absoluto de uma série autocorrelacionada
+           e não estacionária obriga a árvore a aprender "saída ≈ entrada" de
+           forma escalonada.</p></div>
+      <div class="card ok"><h3>A correção</h3>
+        <p>Prever a <b>variação</b> Δ = água(t+h) − água(t) e reconstruir o nível.
+           A persistência passa a ser o zero explícito do alvo, e o modelo
+           aprende a dinâmica: secagem por ETo, recarga por chuva.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>Importância por permutação, medida no holdout</span><span>7</span></div>
+  <aside>"A importância por permutação me entregou a causa. Uma feature valia 17 vezes mais que a segunda — e era o próprio valor atual da umidade."
+
+Detalhe técnico que vale mencionar: árvores não extrapolam. Fora da faixa de umidade vista no treino, elas devolvem o valor da folha mais próxima. Com holdout cronológico caindo na estação seca, isso produz viés sistemático — foi o que observei, +0,98 mm.
+
+Depois da correção, as features importantes passaram a ser as fisicamente corretas: chuva acumulada, VPD, balanço hídrico. Essa é a validação de que a correção foi na direção certa.</aside>
+</section>
+
+<!-- 8 ───────────────────────────────── teoria -->
+<section class="slide tint">
+  <div class="head">
+    <p class="eyebrow">Fundamentação</p>
+    <h2>Acertar a direção não basta: a amplitude custa MSE</h2>
+  </div>
+  <div class="body-area">
+    <div class="card">
+      <p>Com o alvo em Δ, o modelo passou a ter sinal real — correlação
+         ρ = 0,26 a +12 h — mas o <i>skill</i> continuou em zero. A causa é
+         conhecida como <b>diluição de regressão</b>:</p>
+      <p class="lead mono" style="color:var(--ink); padding-top:6px">
+        min<sub>a</sub> MSE(a · d) &nbsp;⟹&nbsp; a* = ρ · σ<sub>obs</sub> / σ<sub>prev</sub>
+        &nbsp;&nbsp;e&nbsp;&nbsp; skill(a*) = ρ²</p>
+    </div>
+    <div class="row">
+      <div class="card flag"><h3>O que estava errado</h3>
+        <p>O modelo apostava amplitude <b>1,9× acima do ótimo</b>. Amplitude
+           excessiva custa MSE <i>mesmo quando o sinal é verdadeiro</i>.</p></div>
+      <div class="card ok"><h3>A correção</h3>
+        <p>Um escalar por horizonte, estimado com predições <b>out-of-fold do
+           treino</b> — nunca no holdout, que seria ajustar no teste.</p></div>
+      <div class="card"><h3>Verificação</h3>
+        <p>O teste unitário confirma a identidade numericamente:
+           <span class="mono">skill = ρ² = 0,4991</span>.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>ρ = correlação entre variação prevista e observada</span><span>8</span></div>
+  <aside>Esta é a parte que vale nota. É teoria estatística aplicada, não tentativa e erro.
+
+"Um regressor treinado com perda quadrática devolve a média condicional, mas sobre série ruidosa a amplitude da previsão fica acima do que o sinal sustenta. A correção é um escalar, e a teoria diz exatamente qual: rho vezes a razão dos desvios-padrão. O ganho máximo é rho ao quadrado."
+
+Se ele perguntar como você sabe que o escalar não é overfitting no teste: ele é estimado nas dobras de validação do treino, fora da amostra. O holdout nunca é tocado.
+
+Detalhe honesto que vale contar: na primeira tentativa usei todas as 5 dobras e o fator saiu 4,5x conservador demais, porque as dobras iniciais treinam com pouca série. Corrigi para usar só as 2 finais.</aside>
+</section>
+
+<!-- 9 ───────────────────────────────── correções -->
+<section class="slide">
+  <div class="head">
+    <p class="eyebrow">Iteração</p>
+    <h2>Três correções, cada uma com número</h2>
+  </div>
+  <div class="body-area">
+    <table>
+      <tr><th style="width:30%">Versão</th><th style="width:44%">O que mudou</th><th style="width:26%">Skill a +12 h</th></tr>
+      <tr><td class="k">Ponto de partida</td><td>Alvo no nível absoluto</td><td class="bad"><b>−0,51</b> &nbsp;perde</td></tr>
+      <tr><td class="k">Alvo em delta</td><td>Prever a variação, reconstruir o nível</td><td class="bad"><b>+0,0001</b> &nbsp;empata</td></tr>
+      <tr><td class="k">Calibração</td><td>Encolhimento da amplitude prevista</td><td><b>+0,025</b> &nbsp;ganha pouco</td></tr>
+      <tr class="hi"><td class="k">Dobras finais</td><td>Calibrar só nas 2 dobras mais recentes</td><td class="good"><b>+0,060</b> &nbsp;ganha</td></tr>
+    </table>
+    <div class="card ok">
+      <p class="lead">O ganho final captura <b class="good">92% do teto teórico ρ²</b>
+        a +12 h e <b class="good">84%</b> a +24 h. O limite restante é
+        informacional — não se resolve com mais ajuste de hiperparâmetro.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Mesmo conjunto de 63 features nas quatro versões</span><span>9</span></div>
+  <aside>Este slide é a espinha dorsal do trabalho. Cada linha é uma hipótese testada e medida.
+
+"Nenhuma dessas correções foi tentativa e erro. Cada uma veio de um diagnóstico: a primeira da importância das features, a segunda da teoria de diluição de regressão, a terceira de notar que as dobras iniciais da validação cruzada treinam com uma fração pequena da série."
+
+Se ele perguntar por que não foi direto ao resultado final: porque eu não sabia o resultado final. O processo foi esse. É o método científico.</aside>
+</section>
+
+<!-- 10 ──────────────────────────────── resultado -->
+<section class="slide dark">
+  <div class="head">
+    <p class="eyebrow">Resultado</p>
+    <h2>Desempenho no holdout de 7 meses</h2>
+  </div>
+  <div class="body-area">
+    <table>
+      <tr><th style="width:17%">Horizonte</th><th style="width:25%">Modelo</th><th style="width:16%">RMSE</th>
+          <th style="width:14%">MAE</th><th style="width:10%">R²</th><th style="width:18%">Skill</th></tr>
+      <tr><td class="k">+12 h</td><td>Random Forest</td><td><b>2,276 mm</b></td><td>1,409 mm</td><td>0,889</td><td class="good"><b>+0,060</b></td></tr>
+      <tr><td class="k">+24 h</td><td>Hist. Gradient Boosting</td><td><b>3,019 mm</b></td><td>1,939 mm</td><td>0,804</td><td class="good"><b>+0,089</b></td></tr>
+    </table>
+    <div class="row">
+      <div class="card"><p class="label">RMSE em fração volumétrica</p>
+        <p style="font-size:30px; color:var(--paper)">0,0081 e 0,0108 m³/m³</p></div>
+      <div class="card"><p class="label">Como % da água disponível</p>
+        <p style="font-size:30px; color:var(--paper)">4,5% e 5,9%</p></div>
+      <div class="card"><p class="label">Viés residual</p>
+        <p style="font-size:30px; color:var(--paper)">+0,15 e +0,04 mm</p></div>
+    </div>
+    <p>Holdout cronológico de 5.221 horas nunca vistas. Modelos escolhidos por
+       validação cruzada temporal entre três candidatos — ganharam modelos
+       diferentes em cada horizonte.</p>
+  </div>
+  <div class="foot"><span>Resultados determinísticos (semente 42)</span><span>10</span></div>
+  <aside>Aqui você pode abrir o terminal e mostrar o treino.log com esses números, ou rodar a inferência ao vivo (10 segundos):
+
+.venv\Scripts\python.exe treinar_modelo_solo.py --prever .\modelos_final\solo_sao_paulo_h24.joblib
+
+Observação importante se ele questionar o RMSE da validação cruzada (4,23 mm) ser PIOR que o do holdout (2,28 mm): isso é o oposto do padrão de overfitting. As dobras da CV caem em períodos mais variáveis (estação chuvosa); o holdout é mais previsível. É evidência a favor, não contra.</aside>
+</section>
+
+<!-- 11 ──────────────────────────────── trade-off -->
+<section class="slide">
+  <div class="head">
+    <p class="eyebrow">Achado secundário</p>
+    <h2>Erro médio e detecção de evento são objetivos em conflito</h2>
+  </div>
+  <div class="body-area">
+    <pre>escala    RMSE     MAE  skill_med  skill_decil  skill_calmas
+ 0,000   3,162   2,019     0,0000       0,0000        <span class="d">0,0000</span>  <span class="d">← persistência pura</span>
+ <span class="c">0,344</span>   <span class="c">3,019</span>   <span class="c">1,939</span>     <span class="c">0,0887</span>       <span class="c">0,0901</span>       <span class="c">−0,5949</span>  <span class="c">← calibrado</span>
+ 0,500   2,993   1,951     0,1043       0,1244       −1,4156
+ 1,000   3,081   2,112     0,0510       <span class="g">0,2066</span>       <span class="d">−6,3624</span>  <span class="d">← saída crua</span></pre>
+    <div class="row">
+      <div class="card flag"><h3>A leitura</h3>
+        <p>A saída crua tem o melhor <i>skill</i> de evento (+0,21) e é
+          <b>6× pior que não fazer nada</b> nas horas calmas — que são metade delas.</p></div>
+      <div class="card ok"><h3>A escolha</h3>
+        <p>A calibração equilibra: <i>skill</i> positivo nas duas pontas, com dano
+           modesto nas horas calmas. Quem só age em evento desliga a calibração.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>Tabela impressa como diagnóstico; escolher a escala nela seria ajustar no teste</span><span>11</span></div>
+  <aside>Este slide mostra maturidade: você não só otimizou uma métrica, você mapeou o conflito entre duas.
+
+"O skill médio é dominado pelas horas em que quase nada muda, e nelas a persistência é imbatível por definição. Mas amplitude cheia, que detecta eventos, destrói o desempenho nas horas calmas. Não existe escala que maximize as duas."
+
+Diga explicitamente que essa tabela é diagnóstico e que escolher a escala a partir dela seria ajustar no teste — o código imprime esse aviso. Isso antecipa a crítica.</aside>
+</section>
+
+<!-- 12 ──────────────────────────────── rigor -->
+<section class="slide tint">
+  <div class="head">
+    <p class="eyebrow">Rigor metodológico</p>
+    <h2>Série temporal viola i.i.d. — cinco salvaguardas</h2>
+  </div>
+  <div class="body-area">
+    <div class="row">
+      <div class="col" style="gap:14px">
+        <div class="card"><h3>1 · Janelas retrospectivas</h3>
+          <p>Nenhuma janela móvel olha adiante. O único <span class="mono">shift</span>
+             negativo do código está na construção do alvo.</p></div>
+        <div class="card"><h3>2 · Grade horária contígua</h3>
+          <p>A série é reindexada antes de qualquer lag. Sem isso, com 30 horas
+             faltando, <span class="mono">shift(24)</span> pegaria t−54 h achando
+             que pegou t−24 h.</p></div>
+        <div class="card"><h3>3 · TimeSeriesSplit com gap</h3>
+          <p>A folga igual ao horizonte impede o fim do treino de alcançar o alvo
+             da validação.</p></div>
+      </div>
+      <div class="col" style="gap:14px">
+        <div class="card"><h3>4 · Holdout cronológico</h3>
+          <p>Últimos 7 meses, nunca amostra aleatória.</p></div>
+        <div class="card ok"><h3>5 · Teste de causalidade</h3>
+          <p>39 asserções offline. A principal <b>multiplica por 7,5 todas as
+             colunas</b> depois de um corte no tempo e exige que nenhuma das 63
+             features anteriores mude — prova empírica de ausência de vazamento.</p></div>
+        <div class="card"><p class="mono" style="color:var(--ink); font-size:22px">
+          $ python teste_vazamento.py<br>
+          <span style="color:var(--teal)">Todos os testes passaram.</span></p></div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span>Rode ao vivo: 5 segundos, sem rede</span><span>12</span></div>
+  <aside>RODE O TESTE AO VIVO AQUI. São 5 segundos, não depende de rede, e é impossível dar errado:
+
+.venv\Scripts\python.exe teste_vazamento.py
+
+"Vazamento temporal é o erro que não aparece em métrica boa — ao contrário, ele produz métrica ótima. Então eu não confiei em revisão de código: escrevi um teste que perturba o futuro e exige que o passado não mude."
+
+O teste também cobre a identidade skill = rho ao quadrado, os casos degenerados da calibração (variância zero, amostra pequena) e o offset correto dos lags após reindexação.</aside>
+</section>
+
+<!-- 13 ──────────────────────────────── limitações -->
+<section class="slide">
+  <div class="head">
+    <p class="eyebrow">Limites do trabalho</p>
+    <h2>O que este modelo não é</h2>
+  </div>
+  <div class="body-area">
+    <div class="card flag">
+      <h3>O alvo não é sensor de campo</h3>
+      <p class="lead">A umidade vem do esquema de superfície do ERA5, não de sonda
+        in situ. O modelo aprende a <b>emular a reanálise</b>. A pipeline foi
+        escrita para a troca: substituindo uma função, entra a série do sensor e
+        o resto não muda.</p>
+    </div>
+    <div class="row">
+      <div class="card"><h3>Esquemas incompatíveis</h3>
+        <p>ERA5 discretiza o solo em 0–7/7–28 cm; o ICON em 0–1/1–3/3–9/9–27 cm.
+           Modelo treinado num esquema não se aplica ao outro — o bundle grava
+           qual foi usado e a inferência valida.</p></div>
+      <div class="card"><h3>Teto informacional</h3>
+        <p>ρ² ≈ 0,07–0,11 é o limite destas features. Para ir além, o caminho é
+           usar <b>previsão meteorológica como feature</b> — chuva e ETo futuras,
+           que hoje o modelo não vê.</p></div>
+      <div class="card"><h3>Um único ponto</h3>
+        <p>Treinado e validado em uma coordenada. Generalização espacial exigiria
+           validação <i>leave-one-station-out</i>.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>Capacidade de campo e ponto de murcha aproximados por percentil, não por curva de retenção</span><span>13</span></div>
+  <aside>DIGA ISSO ANTES DE SER PERGUNTADO. É o que separa um trabalho bom de um ótimo: conhecer e declarar os próprios limites.
+
+Se ele perguntar "então o modelo serve para alguma coisa?": serve como prototipagem da pipeline e para capturar a dinâmica física. Para decisão de irrigação real, o alvo tem que ser sensor. E a arquitetura já está preparada para isso — é uma função a trocar, não um redesenho.
+
+Nunca defenda uma limitação. Reconheça e diga qual é o caminho.</aside>
+</section>
+
+<!-- 14 ──────────────────────────────── reprodução -->
+<section class="slide dark">
+  <div class="head">
+    <p class="eyebrow">Reprodutibilidade</p>
+    <h2>Como verificar tudo o que foi dito</h2>
+  </div>
+  <div class="body-area">
+    <pre><span class="d"># 1 · testes de causalidade das features — 5 s, sem rede</span>
+python teste_vazamento.py
+<span class="d"># 2 · coleta e ETo — 5 s</span>
+python coleta_open_meteo.py --lat -23.5505 --lon -46.6333 --dias 14
+<span class="d"># 3 · treino completo, reproduz os números deste deck — 16 min</span>
+python treinar_modelo_solo.py --lat -23.5505 --lon -46.6333 --anos 3
+<span class="d"># 4 · inferência com o modelo salvo — 10 s</span>
+python treinar_modelo_solo.py --prever modelos/solo_h24.joblib</pre>
+    <div class="row">
+      <div class="card"><h3>Código</h3>
+        <p><span class="mono">coleta_open_meteo.py</span> · 615 linhas<br>
+           <span class="mono">treinar_modelo_solo.py</span> · 900 linhas<br>
+           <span class="mono">teste_vazamento.py</span> · 39 asserções</p></div>
+      <div class="card"><h3>Dependências</h3>
+        <p>requests · pandas · scikit-learn · joblib<br>
+           xgboost e pyarrow opcionais</p></div>
+      <div class="card ok"><h3>Determinismo</h3>
+        <p>Semente fixa em 42. Mesma coordenada e mesma janela devolvem os
+           mesmos números.</p></div>
+    </div>
+  </div>
+  <div class="foot"><span>[Seu nome] · [Disciplina] · [Data]</span><span>14</span></div>
+  <aside>Slide de encerramento. Deixe aberto durante as perguntas.
+
+PERGUNTAS PROVÁVEIS E RESPOSTAS:
+
+"Por que Random Forest e não rede neural?" — Testei três modelos com seleção por CV temporal; ganharam modelos diferentes em cada horizonte. Com 26 mil amostras e 63 features tabulares, árvores são o padrão da literatura. E o gargalo não é capacidade do modelo: é rho = 0,22, ou seja informação nas features.
+
+"Como sabe que não há overfitting?" — Holdout cronológico de 7 meses, gap na CV igual ao horizonte, e o teste de perturbação. Além disso o RMSE da CV é PIOR que o do holdout, o oposto do padrão de overfitting.
+
+"Skill de 0,06 não é muito baixo?" — É baixo, e é o resultado honesto para 12 h num processo com essa autocorrelação. O que importa é que captura 92% do teto teórico. O limite é físico-informacional.
+
+"E o R² de 0,88, não é bom?" — É o número que quase me enganou. (Volte ao slide 6.)
+
+"Por que não usou a previsão do tempo como feature?" — É exatamente o próximo passo. A Open-Meteo entrega chuva e ETo previstas; hoje o modelo só vê o passado.
+
+TROQUE os placeholders antes de apresentar.</aside>
+</section>
+
+</div>
+
+<div id="hud">← → navegar · N notas · F tela cheia · <span id="pg">1 / 14</span></div>
+<div id="notes"></div>
+
+<script>
+(function(){
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var stage = document.getElementById('stage');
+  var notes = document.getElementById('notes');
+  var pg = document.getElementById('pg');
+  var i = 0, notesOn = false;
+
+  function fit(){
+    var s = Math.min(window.innerWidth / 1600, window.innerHeight / 900);
+    var x = (window.innerWidth - 1600 * s) / 2;
+    var y = (window.innerHeight - 900 * s) / 2;
+    stage.style.transform = 'translate(' + x + 'px,' + y + 'px) scale(' + s + ')';
+  }
+
+  function render(){
+    slides.forEach(function(el, n){ el.classList.toggle('on', n === i); });
+    pg.textContent = (i + 1) + ' / ' + slides.length;
+    var a = slides[i].querySelector('aside');
+    notes.textContent = a ? a.textContent.trim() : '(sem notas)';
+    try { location.hash = '#' + (i + 1); } catch (e) {}
+  }
+
+  function go(n){
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    render();
+  }
+
+  document.addEventListener('keydown', function(e){
+    var k = e.key;
+    if (k === 'ArrowRight' || k === 'PageDown' || k === ' ' || k === 'Enter') { go(i + 1); e.preventDefault(); }
+    else if (k === 'ArrowLeft' || k === 'PageUp' || k === 'Backspace') { go(i - 1); e.preventDefault(); }
+    else if (k === 'Home') { go(0); }
+    else if (k === 'End') { go(slides.length - 1); }
+    else if (k === 'n' || k === 'N') { notesOn = !notesOn; notes.classList.toggle('on', notesOn); }
+    else if (k === 'f' || k === 'F') {
+      if (document.fullscreenElement) { document.exitFullscreen(); }
+      else if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen(); }
+    }
+  });
+
+  document.addEventListener('click', function(e){
+    if (notes.contains(e.target)) return;
+    go(e.clientX < window.innerWidth * 0.25 ? i - 1 : i + 1);
+  });
+
+  function fromHash(){
+    var h = parseInt((location.hash || '').replace('#', ''), 10);
+    return isNaN(h) ? 0 : h - 1;
+  }
+  // Permite link direto para um slide (#10) e o botao voltar do navegador.
+  window.addEventListener('hashchange', function(){
+    var n = fromHash();
+    if (n !== i) go(n);
+  });
+
+  window.addEventListener('resize', fit);
+  fit();
+  go(fromHash());
+})();
+</script>
+</body>
+</html>

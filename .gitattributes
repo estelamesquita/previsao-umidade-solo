@@ -1,0 +1,15 @@
+# Normaliza fim de linha no repositorio (LF), preservando CRLF no checkout Windows
+* text=auto
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.csv  text eol=lf
+
+# Binarios: nunca converter
+*.joblib binary
+*.png    binary
+*.jpg    binary
+*.pdf    binary

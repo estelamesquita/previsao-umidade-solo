@@ -1,0 +1,34 @@
+# Ambiente virtual (365 MB)
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Saidas de coleta (regeneradas por coleta_open_meteo.py)
+dados_meteo/
+repro/
+teste_saida/
+demo_falha/
+
+# Modelos treinados: artefatos de build, regenerados por treinar_modelo_solo.py.
+# O bundle de +12h tem 85 MB (Random Forest com 400 arvores) e estoura o limite
+# pratico do GitHub. O de +24h tem 790 KB e fica versionado de proposito, para
+# que `--prever` funcione sem esperar 16 min de treino.
+*.joblib
+!modelos_final/solo_sao_paulo_h24.joblib
+
+# Logs
+*.log
+
+# Sistema operacional / editores
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
