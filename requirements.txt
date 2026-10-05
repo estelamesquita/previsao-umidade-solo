@@ -6,6 +6,11 @@ pandas>=2.1
 scikit-learn>=1.3
 joblib>=1.3
 
+# backend (servidor.py)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
 # opcionais
 xgboost>=2.0    # terceiro candidato no catalogo de modelos
 pyarrow>=15.0   # necessario apenas para --formato parquet
+httpx>=0.27     # necessario apenas para rodar teste_servidor.py

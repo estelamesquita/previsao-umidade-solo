@@ -32,3 +32,5 @@ desktop.ini
 .DS_Store
 .vscode/
 .idea/
+
+estado_servidor.json

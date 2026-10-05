@@ -18,8 +18,10 @@ olhar o R²** — ele por si só não diz se o modelo serve.
 coleta_open_meteo.py     coleta horária/diária + ETo (Hargreaves e Penman-Monteith)
 treinar_modelo_solo.py   dataset supervisionado, treino, avaliação, export joblib
 controle_irrigacao.py    controlador PID e Fuzzy: setpoint + sensor -> pulso do atuador
+servidor.py              backend FastAPI entre o ESP32 e o controle
 teste_vazamento.py       testes de causalidade das features (roda offline)
 teste_controle.py        testes do controlador com simulador de solo (roda offline)
+teste_servidor.py        testes do backend (roda offline)
 apresentacao.html        deck de 14 slides (abra no navegador; F = tela cheia, N = notas)
 modelos_final/           bundle de +24h, predições do holdout e resumo das métricas
 requirements.txt
@@ -231,6 +233,78 @@ propriedades que tornam o processo difícil: tempo morto na infiltração e
 drenagem irreversível acima da capacidade de campo. Verifica convergência,
 ausência de overshoot, anti-windup sob saturação, derivada sem chute de
 setpoint, e o comportamento diante de chuva.
+
+## Backend para o ESP32
+
+```bash
+pip install fastapi "uvicorn[standard]"
+uvicorn servidor:app --host 0.0.0.0 --port 8000
+```
+
+Dois endpoints de operação, mais `/health` e `/api/v1/status/{id}` para
+diagnóstico. Documentação interativa em `/docs`.
+
+```http
+POST /api/v1/leitura
+{"device_id": "esp32-horta-01", "umidade_m3m3": 0.29, "bateria_v": 3.7}
+
+GET /api/v1/comando/esp32-horta-01
+{"acionar": true, "segundos": 1800.0, "duty": 1.0,
+ "comando_id": "77aca9a813b6", "motivo": "irrigar",
+ "setpoint_mm": 104.82, "erro_mm": 23.62, "proximo_poll_s": 60}
+```
+
+### Dois laços de velocidades diferentes
+
+O modelo precisa de 168 h de histórico e de uma chamada à Open-Meteo: leva
+segundos e tem horizonte de 12 a 24 h. O ESP32 consulta a cada minuto. Rodar
+o modelo por requisição seria lento e inútil — a previsão não muda em 60 s.
+
+```
+laço lento   (~1 h)      modelo → SETPOINT, em cache com TTL
+laço rápido  (por poll)  setpoint + leitura → PID → PULSO
+```
+
+O modelo prevê a água em t+24 h; se antecipa **queda**, o setpoint sobe agora
+para criar folga antes da demanda chegar. O ajuste é multiplicado por
+`IRRIGACAO_CONFIANCA` (padrão 0,5), porque com o skill medido (0,060 e 0,089)
+apostar o acionamento inteiro na previsão não se justifica.
+
+**Se o modelo falhar, o controle continua.** O setpoint cai para uma fração
+fixa da água disponível e a resposta vem com `degradado: true`. Um sistema de
+irrigação que para porque a IA parou é pior que um temporizador burro.
+
+### Decisões de protocolo pensadas para o ESP32
+
+| decisão | por quê |
+|---|---|
+| relógio do **servidor** | ESP32 sem RTC perde a hora a cada reset, e carimbo errado corrompe o lockout e a cota diária |
+| GET **idempotente** por 120 s | o retry do dispositivo devolve o mesmo `comando_id`, não uma segunda dose |
+| `proximo_poll_s` na resposta | o dispositivo dorme o tempo certo em vez de consultar em laço |
+| `comando_executado` no POST | fecha o ciclo e torna visível a bomba que não ligou |
+| estado persistido em disco | sem isso, um laço de reinicialização zeraria a cota e encharcaria a lavoura |
+
+Em qualquer dúvida — sem leitura, leitura vencida, erro interno — a resposta é
+**não acionar**. Irrigar às cegas é o único erro verdadeiramente caro deste
+sistema, e por isso até o handler de exceção genérico responde `acionar: false`.
+
+### Segurança
+
+O endpoint comanda uma bomba. Defina `IRRIGACAO_API_KEY` e o servidor passa a
+exigir o header `X-API-Key`; sem ela, sobe aberto e registra um aviso no log.
+Toda a configuração é por variável de ambiente (`IRRIGACAO_VAZAO_LPH`,
+`IRRIGACAO_CC_MM`, `IRRIGACAO_BUNDLE`, …).
+
+### Testes
+
+```bash
+python teste_servidor.py
+```
+
+52 asserções, sem rede e sem modelo treinado. O foco não é "o endpoint
+responde 200": é que o servidor **nunca ligue a bomba por engano**. Cobre
+sensor mudo, leitura vencida, modelo fora do ar, retry do dispositivo, corpo
+malformado, autenticação e sobrevivência da cota diária a um reinício.
 
 ## Rigor temporal
 
