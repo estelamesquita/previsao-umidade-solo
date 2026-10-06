@@ -19,6 +19,7 @@ coleta_open_meteo.py     coleta horária/diária + ETo (Hargreaves e Penman-Mont
 treinar_modelo_solo.py   dataset supervisionado, treino, avaliação, export joblib
 controle_irrigacao.py    controlador PID e Fuzzy: setpoint + sensor -> pulso do atuador
 servidor.py              backend FastAPI entre o ESP32 e o controle
+dashboard.py             painel Streamlit: gráficos, status da bomba, auto/manual
 teste_vazamento.py       testes de causalidade das features (roda offline)
 teste_controle.py        testes do controlador com simulador de solo (roda offline)
 teste_servidor.py        testes do backend (roda offline)
@@ -305,6 +306,49 @@ python teste_servidor.py
 responde 200": é que o servidor **nunca ligue a bomba por engano**. Cobre
 sensor mudo, leitura vencida, modelo fora do ar, retry do dispositivo, corpo
 malformado, autenticação e sobrevivência da cota diária a um reinício.
+
+## Painel
+
+```bash
+pip install streamlit
+streamlit run dashboard.py
+```
+
+Exige o backend no ar. Configure endereço, chave e dispositivo na barra lateral
+(ou em `IRRIGACAO_API_URL` / `IRRIGACAO_DEVICE`).
+
+Mostra umidade do solo e setpoint sobre a faixa de água útil, os pulsos
+aplicados, a previsão do tempo, o estado da bomba e o seletor automático/manual.
+
+### O botão de modo vive no servidor, não na sessão
+
+Quem consulta o servidor é o **ESP32**, não o painel. Um modo guardado em
+`st.session_state` deixaria a bomba irrigando sozinha com a tela escrito
+"Manual" — um enfeite, não um controle. Por isso o modo é estado do servidor
+(`POST /api/v1/modo/{id}`), sobrevive a reinício e cancela qualquer comando
+pendente ao assumir o controle: quem passou para manual não quer uma decisão
+antiga chegando depois.
+
+O acionamento manual (`POST /api/v1/acionar/{id}`) dispensa a **decisão** do
+controlador, nunca os **limites**. Um pedido de 1800 s com cota de 1 mm sai
+cortado para 318 s; com o solo no teto de capacidade, é recusado. "Manual" não
+é atalho para encharcar a lavoura.
+
+### Decisões dos gráficos
+
+**Nunca eixo duplo.** Chuva e ETo dividem um eixo porque ambas estão em mm — e
+é essa a leitura: uma entra no solo, a outra sai. Temperatura, que está em °C,
+vai para um gráfico próprio. Juntar escalas diferentes num eixo inventa
+correlação que o dado não tem.
+
+**Cor nunca sozinha.** Todo selo de estado leva ícone e texto, para funcionar
+em daltonismo, impressão e alto contraste. As duas séries usam os slots 1 e 2
+da paleta de referência sem alteração, cuja documentação certifica que os três
+primeiros passam em todos os pares (CVD ΔE 9,2 claro / 9,4 escuro). *Não rodei
+o validador — `node` não está disponível nesta máquina.*
+
+**Toda leitura é alcançável sem o mouse.** Cada gráfico tem sua tabela
+equivalente num expander; o tooltip enriquece, não é a única via.
 
 ## Rigor temporal
 

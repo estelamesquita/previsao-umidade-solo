@@ -59,6 +59,7 @@ import os
 import secrets
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,6 +127,7 @@ class Config:
     poll_irrigando_s: int = int(_env_float("IRRIGACAO_POLL_IRRIGANDO_S", 60.0))
     validade_comando_s: float = _env_float("IRRIGACAO_VALIDADE_COMANDO_S", 120.0)
     leitura_velha_s: float = _env_float("IRRIGACAO_LEITURA_VELHA_S", 1800.0)
+    historico_max: int = int(_env_float("IRRIGACAO_HISTORICO_MAX", 2880.0))
 
     controlador: Literal["pid", "fuzzy"] = os.getenv("IRRIGACAO_CONTROLADOR", "pid")  # type: ignore[assignment]
 
@@ -207,15 +209,51 @@ class ComandoResposta(BaseModel):
 class StatusResposta(BaseModel):
     device_id: str
     online: bool
+    modo: Literal["auto", "manual"]
+    bomba_ligada: bool
+    segundos_restantes: float
     ultima_leitura_s: float | None
     umidade_mm: float | None
     setpoint_mm: float | None
     origem_setpoint: str
     consumo_dia_mm: float
+    cota_diaria_mm: float
     agua_em_transito_mm: float
     comando_pendente: str | None
     irrigacoes_hoje: int
     falhas_bomba: int
+    capacidade_campo_mm: float
+    ponto_murcha_mm: float
+    ultimo_motivo: str
+
+
+class ModoEntrada(BaseModel):
+    modo: Literal["auto", "manual"]
+
+
+class AcionamentoManual(BaseModel):
+    """Pulso disparado pelo operador no painel.
+
+    Manual dispensa a DECISAO do controlador, nunca os LIMITES: o pulso
+    continua sujeito ao maximo do atuador, a cota diaria e a capacidade de
+    campo. 'Manual' nao pode virar um atalho para encharcar a lavoura.
+    """
+
+    segundos: float = Field(gt=0.0, le=7200.0)
+
+
+class PontoHistorico(BaseModel):
+    t: float
+    umidade_mm: float
+    setpoint_mm: float | None = None
+    irrigado_mm: float | None = None
+
+
+class HistoricoResposta(BaseModel):
+    device_id: str
+    pontos: list[PontoHistorico]
+    capacidade_campo_mm: float
+    ponto_murcha_mm: float
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +283,30 @@ class EstadoDispositivo:
     falhas_bomba: int = 0
     ultima_temperatura_c: float | None = None
     ultima_bateria_v: float | None = None
+    # Modo de operacao. Vive no SERVIDOR, nao no painel: e o ESP32 que
+    # consulta, entao um modo guardado so na sessao do dashboard deixaria a
+    # bomba irrigando sozinha com a tela dizendo "Manual".
+    modo: Literal["auto", "manual"] = "auto"
+    ultimo_motivo: str = "sem_leitura_do_sensor"
+    historico: deque[tuple[float, float, float | None, float | None]] = field(
+        default_factory=lambda: deque(maxlen=CFG.historico_max)
+    )
+
+    def registrar(self, umidade_mm: float, setpoint_mm: float | None,
+                  irrigado_mm: float | None = None) -> None:
+        self.historico.append((time.time(), umidade_mm, setpoint_mm, irrigado_mm))
+
+    @property
+    def bomba_ligada(self) -> bool:
+        """Ligada enquanto o pulso emitido ainda estiver correndo."""
+        return self.segundos_restantes > 0.0
+
+    @property
+    def segundos_restantes(self) -> float:
+        if self.pendente is None:
+            return 0.0
+        decorrido = time.monotonic() - self.pendente.emitido_em
+        return max(0.0, self.pendente.segundos - decorrido)
 
 
 class Registro:
@@ -300,6 +362,7 @@ class Registro:
                     "consumo_dia_mm": e.controlador.consumo_dia_mm,
                     "irrigacoes": e.irrigacoes,
                     "falhas_bomba": e.falhas_bomba,
+                    "modo": e.modo,
                 }
                 for did, e in self._d.items()
             },
@@ -310,6 +373,10 @@ class Registro:
             est = await self.obter(did)
             est.irrigacoes = int(d.get("irrigacoes", 0))
             est.falhas_bomba = int(d.get("falhas_bomba", 0))
+            # Modo sobrevive ao reinicio: quem deixou em manual (manutencao,
+            # poda) nao quer o automatico voltando sozinho.
+            if d.get("modo") in ("auto", "manual"):
+                est.modo = d["modo"]
             consumo = float(d.get("consumo_dia_mm", 0.0))
             # Reaplica a cota ja gasta: conservador por construcao.
             est.controlador._consumo_dia_mm = consumo
@@ -532,6 +599,10 @@ async def receber_leitura(leitura: LeituraEntrada) -> LeituraResposta:
     anterior — e assim que uma bomba que nao ligou fica visivel.
     """
     est = await registro.obter(leitura.device_id)
+    # Setpoint vem do cache (TTL de ~1 h), entao isto nao custa nada e deixa
+    # a serie do painel CONTINUA: registrado so nas irrigacoes, ele viraria
+    # um punhado de pontos soltos e nenhuma linha.
+    sp = await servico_setpoint.obter()
 
     # Sem `or 0.0`: ausencia de leitura NAO pode virar "0 mm, solo seco".
     if leitura.umidade_mm is not None:
@@ -565,6 +636,8 @@ async def receber_leitura(leitura: LeituraEntrada) -> LeituraResposta:
                         est.pendente.segundos, executado,
                     )
                 est.pendente = None
+
+        est.registrar(umidade_mm, sp.valor_mm)
 
     proximo = (CFG.poll_irrigando_s if est.pendente else CFG.poll_normal_s)
     return LeituraResposta(
@@ -624,12 +697,26 @@ async def obter_comando(device_id: str) -> ComandoResposta:
                         device_id, est.pendente.comando_id)
             est.pendente = None
 
+        # Em modo manual o controlador NAO decide. Qualquer pulso vem de um
+        # acionamento explicito do operador, que ja virou comando pendente e
+        # foi tratado acima.
+        if est.modo == "manual":
+            est.ultimo_motivo = "modo_manual"
+            return ComandoResposta(
+                acionar=False, segundos=0.0, duty=0.0, comando_id="-",
+                motivo="modo_manual", umidade_mm=est.umidade_mm,
+                setpoint_mm=round(sp.valor_mm, 2),
+                origem_setpoint=sp.origem, degradado=sp.degradado,
+                proximo_poll_s=CFG.poll_irrigando_s,
+            )
+
         decisao: Decisao = est.controlador.atualizar(
             umidade_mm=est.umidade_mm,
             setpoint_mm=sp.valor_mm,
             instante_s=time.monotonic(),
         )
 
+        est.ultimo_motivo = decisao.motivo.value
         if not decisao.irrigar:
             return ComandoResposta(
                 acionar=False, segundos=0.0, duty=0.0, comando_id="-",
@@ -646,6 +733,7 @@ async def obter_comando(device_id: str) -> ComandoResposta:
             emitido_em=time.monotonic(),
         )
         est.irrigacoes += 1
+        est.registrar(est.umidade_mm, sp.valor_mm, decisao.lamina_mm)
         LOG.info("%s: acionar %.0f s (%.2f mm), comando %s",
                  device_id, decisao.pulso_s, decisao.lamina_mm, cid)
 
@@ -672,15 +760,146 @@ async def status_dispositivo(device_id: str) -> StatusResposta:
     return StatusResposta(
         device_id=device_id,
         online=idade is not None and idade <= CFG.leitura_velha_s,
+        modo=est.modo,
+        bomba_ligada=est.bomba_ligada,
+        segundos_restantes=round(est.segundos_restantes, 1),
         ultima_leitura_s=round(idade, 1) if idade is not None else None,
         umidade_mm=est.umidade_mm,
         setpoint_mm=round(sp.valor_mm, 2),
         origem_setpoint=sp.origem,
         consumo_dia_mm=round(est.controlador.consumo_dia_mm, 3),
+        cota_diaria_mm=registro.limites.lamina_diaria_max_mm,
         agua_em_transito_mm=round(est.controlador.agua_em_transito_mm, 3),
         comando_pendente=est.pendente.comando_id if est.pendente else None,
         irrigacoes_hoje=est.irrigacoes,
         falhas_bomba=est.falhas_bomba,
+        capacidade_campo_mm=registro.limites.capacidade_campo_mm,
+        ponto_murcha_mm=registro.limites.ponto_murcha_mm,
+        ultimo_motivo=est.ultimo_motivo,
+    )
+
+
+@app.post("/api/v1/modo/{device_id}", response_model=StatusResposta,
+          dependencies=[Depends(exigir_api_key)], tags=["operacao"])
+async def definir_modo(device_id: str, entrada: ModoEntrada) -> StatusResposta:
+    """Alterna entre automatico e manual.
+
+    O modo vive no SERVIDOR porque e ele que o ESP32 consulta. Ao entrar em
+    manual, qualquer comando pendente e cancelado: quem assumiu o controle
+    nao quer uma decisao antiga chegando depois.
+    """
+    est = await registro.obter(device_id)
+    async with est.lock:
+        anterior = est.modo
+        est.modo = entrada.modo
+        if entrada.modo == "manual" and est.pendente is not None:
+            LOG.info("%s: modo manual cancela o comando pendente %s",
+                     device_id, est.pendente.comando_id)
+            est.pendente = None
+        est.ultimo_motivo = f"modo_alterado_para_{entrada.modo}"
+    LOG.info("%s: modo %s -> %s", device_id, anterior, entrada.modo)
+    await _salvar_estado()
+    return await status_dispositivo(device_id)
+
+
+@app.post("/api/v1/acionar/{device_id}", response_model=ComandoResposta,
+          dependencies=[Depends(exigir_api_key)], tags=["operacao"])
+async def acionar_manual(device_id: str,
+                         pedido: AcionamentoManual) -> ComandoResposta:
+    """Dispara um pulso manual, so em modo manual.
+
+    Dispensa a DECISAO do controlador, nunca os LIMITES. O pulso e cortado
+    pelo maximo do atuador, pela cota diaria restante e pelo espaco ate a
+    capacidade de campo — 'manual' nao e atalho para encharcar a lavoura.
+    """
+    est = registro.existente(device_id)
+    if est is None:
+        raise HTTPException(status_code=404, detail="dispositivo desconhecido")
+    if est.modo != "manual":
+        raise HTTPException(
+            status_code=409,
+            detail="acionamento manual exige o modo manual; alterne primeiro",
+        )
+    if est.umidade_mm is None:
+        raise HTTPException(status_code=409, detail="sem leitura do sensor")
+
+    atuador, limites = registro.atuador, registro.limites
+    sp = await servico_setpoint.obter()
+
+    async with est.lock:
+        if est.pendente is not None and est.segundos_restantes > 0:
+            raise HTTPException(status_code=409,
+                                detail="ja existe um pulso em andamento")
+
+        segundos = min(pedido.segundos, atuador.pulso_max_s)
+        lamina = atuador.lamina_de(segundos)
+
+        restante = limites.lamina_diaria_max_mm - est.controlador.consumo_dia_mm
+        espaco = max(0.0, limites.teto_mm - est.umidade_mm
+                     - est.controlador.agua_em_transito_mm)
+        limite_mm = min(restante, espaco)
+        if limite_mm <= 0:
+            motivo = ("cota_diaria_esgotada" if restante <= 0
+                      else "limitado_pela_capacidade_de_campo")
+            raise HTTPException(status_code=409, detail=motivo)
+
+        if lamina > limite_mm:
+            lamina = limite_mm
+            segundos = atuador.segundos_para(lamina)
+            LOG.info("%s: pulso manual reduzido para %.0f s pelos limites",
+                     device_id, segundos)
+
+        if segundos < atuador.pulso_min_s:
+            raise HTTPException(
+                status_code=409,
+                detail=f"pulso resultante ({segundos:.0f} s) abaixo do minimo "
+                       f"do atuador ({atuador.pulso_min_s:.0f} s)",
+            )
+
+        cid = uuid.uuid4().hex[:12]
+        est.pendente = ComandoPendente(
+            comando_id=cid, segundos=round(segundos, 1),
+            duty=round(atuador.duty(segundos), 3), motivo="manual",
+            emitido_em=time.monotonic(),
+        )
+        est.irrigacoes += 1
+        est.ultimo_motivo = "manual"
+        # Debita no MESMO contador do automatico: senao o manual furaria a
+        # cota diaria por fora e o automatico nao saberia.
+        est.controlador._consumo_dia_mm += lamina
+        est.controlador._transito_mm += lamina
+        est.controlador._t_transito = time.monotonic()
+        est.controlador._t_ultima_irrigacao = time.monotonic()
+        est.registrar(est.umidade_mm, sp.valor_mm, lamina)
+
+    LOG.info("%s: pulso MANUAL de %.0f s (%.2f mm), comando %s",
+             device_id, segundos, lamina, cid)
+    return ComandoResposta(
+        acionar=True, segundos=round(segundos, 1),
+        duty=round(atuador.duty(segundos), 3), comando_id=cid,
+        motivo="manual", umidade_mm=est.umidade_mm,
+        setpoint_mm=round(sp.valor_mm, 2), origem_setpoint=sp.origem,
+        degradado=sp.degradado, proximo_poll_s=CFG.poll_irrigando_s,
+    )
+
+
+@app.get("/api/v1/historico/{device_id}", response_model=HistoricoResposta,
+         dependencies=[Depends(exigir_api_key)], tags=["operacao"])
+async def historico(device_id: str, horas: float = 24.0) -> HistoricoResposta:
+    """Serie de umidade para os graficos do painel."""
+    est = registro.existente(device_id)
+    if est is None:
+        raise HTTPException(status_code=404, detail="dispositivo desconhecido")
+
+    corte = time.time() - max(0.1, horas) * 3600.0
+    pontos = [
+        PontoHistorico(t=t, umidade_mm=u, setpoint_mm=s, irrigado_mm=i)
+        for (t, u, s, i) in est.historico if t >= corte
+    ]
+    return HistoricoResposta(
+        device_id=device_id, pontos=pontos,
+        capacidade_campo_mm=registro.limites.capacidade_campo_mm,
+        ponto_murcha_mm=registro.limites.ponto_murcha_mm,
     )
 
 

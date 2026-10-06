@@ -305,6 +305,175 @@ def teste_persistencia() -> None:
                "o contador de irrigacoes tambem sobrevive")
 
 
+def teste_modo() -> None:
+    print("\n[14] Modo automatico x manual")
+    _, cliente = montar_app()
+    with cliente:
+        cliente.post("/api/v1/leitura",
+                     json={"device_id": "esp32-10", "umidade_m3m3": 0.28})
+        st = cliente.get("/api/v1/status/esp32-10").json()
+        checar(st["modo"] == "auto", "o padrao e automatico")
+
+        r = cliente.post("/api/v1/modo/esp32-10", json={"modo": "manual"})
+        checar(r.status_code == 200, "a troca de modo responde 200")
+        checar(r.json()["modo"] == "manual", "e o status ja reflete manual")
+
+        # O ponto central: em manual o controlador NAO decide sozinho.
+        cliente.get("/api/v1/comando/esp32-10")
+        j = cliente.get("/api/v1/comando/esp32-10").json()
+        checar(j["acionar"] is False,
+               "em MANUAL o automatico nao aciona, mesmo com deficit grande")
+        checar(j["motivo"] == "modo_manual", "e o motivo e explicito")
+
+        r = cliente.post("/api/v1/modo/esp32-10", json={"modo": "auto"})
+        checar(r.json()["modo"] == "auto", "volta para automatico")
+        cliente.get("/api/v1/comando/esp32-10")
+        j = cliente.get("/api/v1/comando/esp32-10").json()
+        checar(j["acionar"] is True, "de volta em AUTO, o controlador decide")
+
+        r = cliente.post("/api/v1/modo/esp32-10", json={"modo": "turbo"})
+        checar(r.status_code == 422, "modo invalido e recusado com 422")
+
+
+def teste_manual_cancela_pendente() -> None:
+    print("\n[15] Entrar em manual cancela comando pendente")
+    _, cliente = montar_app()
+    with cliente:
+        cliente.post("/api/v1/leitura",
+                     json={"device_id": "esp32-11", "umidade_m3m3": 0.28})
+        cliente.get("/api/v1/comando/esp32-11")
+        cmd = cliente.get("/api/v1/comando/esp32-11").json()
+        checar(cmd["acionar"] is True, "o automatico emitiu um comando")
+
+        cliente.post("/api/v1/modo/esp32-11", json={"modo": "manual"})
+        st = cliente.get("/api/v1/status/esp32-11").json()
+        checar(st["comando_pendente"] is None,
+               "ao assumir o controle, a decisao antiga e cancelada")
+
+
+def teste_acionamento_manual() -> None:
+    print("\n[16] Acionamento manual")
+    _, cliente = montar_app()
+    with cliente:
+        cliente.post("/api/v1/leitura",
+                     json={"device_id": "esp32-12", "umidade_m3m3": 0.28})
+
+        r = cliente.post("/api/v1/acionar/esp32-12", json={"segundos": 60})
+        checar(r.status_code == 409,
+               "acionar manual em modo AUTO e recusado com 409")
+
+        cliente.post("/api/v1/modo/esp32-12", json={"modo": "manual"})
+        r = cliente.post("/api/v1/acionar/esp32-12", json={"segundos": 60})
+        checar(r.status_code == 200, "em manual, o acionamento e aceito")
+        j = r.json()
+        checar(j["acionar"] is True and j["segundos"] == 60.0,
+               "com a duracao pedida")
+        checar(j["motivo"] == "manual", "marcado como manual")
+
+        # O ESP32 agora recebe esse comando pelo GET normal.
+        g = cliente.get("/api/v1/comando/esp32-12").json()
+        checar(g["comando_id"] == j["comando_id"],
+               "o GET entrega o pulso manual ao dispositivo")
+
+        r = cliente.post("/api/v1/acionar/esp32-12", json={"segundos": 60})
+        checar(r.status_code == 409,
+               "um segundo pulso durante o primeiro e recusado")
+
+        for corpo, rotulo in (({"segundos": 0}, "duracao zero"),
+                              ({"segundos": -5}, "duracao negativa"),
+                              ({"segundos": 99999}, "duracao absurda")):
+            r = cliente.post("/api/v1/acionar/esp32-12", json=corpo)
+            checar(r.status_code == 422, f"{rotulo} e recusada com 422")
+
+
+def teste_manual_respeita_limites() -> None:
+    print("\n[17] Manual dispensa a decisao, nao os limites")
+    _, cliente = montar_app(IRRIGACAO_LAMINA_DIA_MM="1.0")
+    with cliente:
+        cliente.post("/api/v1/leitura",
+                     json={"device_id": "esp32-13", "umidade_m3m3": 0.28})
+        cliente.post("/api/v1/modo/esp32-13", json={"modo": "manual"})
+
+        # 1800 s a 6,8 mm/h = 3,4 mm, muito acima da cota de 1,0 mm.
+        r = cliente.post("/api/v1/acionar/esp32-13", json={"segundos": 1800})
+        checar(r.status_code == 200, "o pedido excessivo nao e rejeitado...")
+        j = r.json()
+        checar(j["segundos"] < 1800.0,
+               f"...mas e CORTADO pela cota diaria ({j['segundos']:.0f} s "
+               "em vez de 1800)")
+
+        st = cliente.get("/api/v1/status/esp32-13").json()
+        checar(st["consumo_dia_mm"] <= 1.0 + 1e-6,
+               "o manual debita na MESMA cota do automatico")
+
+        r = cliente.post("/api/v1/acionar/esp32-13", json={"segundos": 60})
+        checar(r.status_code == 409, "esgotada a cota, o manual tambem para")
+
+    # Solo quase cheio: ainda ha folga, entao o pulso e CORTADO, nao negado.
+    # (teto = 122,6 - 2,0 = 120,6 mm; com 120,0 sobram 0,6 mm)
+    _, cliente2 = montar_app()
+    with cliente2:
+        cliente2.post("/api/v1/leitura",
+                      json={"device_id": "esp32-14", "umidade_mm": 120.0})
+        cliente2.post("/api/v1/modo/esp32-14", json={"modo": "manual"})
+        r = cliente2.post("/api/v1/acionar/esp32-14", json={"segundos": 1800})
+        checar(r.status_code == 200,
+               "com pouca folga ate a capacidade, o pulso e aceito...")
+        checar(r.json()["segundos"] < 400.0,
+               f"...porem cortado para caber na folga "
+               f"({r.json()['segundos']:.0f} s em vez de 1800)")
+
+    # Solo NO teto: nao ha folga nenhuma, e ai sim o manual e recusado.
+    _, cliente3 = montar_app()
+    with cliente3:
+        cliente3.post("/api/v1/leitura",
+                      json={"device_id": "esp32-17", "umidade_mm": 121.0})
+        cliente3.post("/api/v1/modo/esp32-17", json={"modo": "manual"})
+        r = cliente3.post("/api/v1/acionar/esp32-17", json={"segundos": 1800})
+        checar(r.status_code == 409,
+               "sem folga alguma, o manual e recusado (nao encharca)")
+        checar("capacidade" in r.json()["detail"],
+               "e o motivo cita a capacidade de campo")
+
+
+def teste_historico() -> None:
+    print("\n[18] Historico para os graficos")
+    _, cliente = montar_app()
+    with cliente:
+        r = cliente.get("/api/v1/historico/esp32-15")
+        checar(r.status_code == 404, "historico de device desconhecido da 404")
+
+        for v in (0.28, 0.29, 0.30):
+            cliente.post("/api/v1/leitura",
+                         json={"device_id": "esp32-15", "umidade_m3m3": v})
+        j = cliente.get("/api/v1/historico/esp32-15").json()
+        checar(len(j["pontos"]) == 3, "cada leitura vira um ponto do historico")
+        checar(j["capacidade_campo_mm"] > j["ponto_murcha_mm"],
+               "a resposta carrega as faixas agronomicas para o grafico")
+        checar(all("t" in p and "umidade_mm" in p for p in j["pontos"]),
+               "cada ponto traz instante e umidade")
+
+        j = cliente.get("/api/v1/historico/esp32-15", params={"horas": 0.0001}).json()
+        checar(len(j["pontos"]) <= 3, "a janela em horas filtra os pontos")
+
+
+def teste_modo_persiste() -> None:
+    print("\n[19] O modo sobrevive ao reinicio")
+    caminho = str(Path(tempfile.mkdtemp()) / "estado.json")
+    _, cliente = montar_app(IRRIGACAO_ESTADO=caminho)
+    with cliente:
+        cliente.post("/api/v1/leitura",
+                     json={"device_id": "esp32-16", "umidade_m3m3": 0.30})
+        cliente.post("/api/v1/modo/esp32-16", json={"modo": "manual"})
+
+    _, cliente2 = montar_app(IRRIGACAO_ESTADO=caminho)
+    with cliente2:
+        st = cliente2.get("/api/v1/status/esp32-16").json()
+        checar(st["modo"] == "manual",
+               "quem deixou em manual (manutencao, poda) nao quer o "
+               "automatico voltando sozinho apos um restart")
+
+
 def teste_status_desconhecido() -> None:
     print("\n[13] Status de dispositivo desconhecido")
     _, cliente = montar_app()
@@ -330,6 +499,12 @@ def main() -> int:
     teste_modelo_fora_do_ar()
     teste_solo_umido()
     teste_persistencia()
+    teste_modo()
+    teste_manual_cancela_pendente()
+    teste_acionamento_manual()
+    teste_manual_respeita_limites()
+    teste_historico()
+    teste_modo_persiste()
     teste_status_desconhecido()
 
     print("\n" + "=" * 72)
