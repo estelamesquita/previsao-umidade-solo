@@ -35,3 +35,4 @@ desktop.ini
 
 estado_servidor.json
 COMMIT_MSG.tmp
+firmware_esp32/build/

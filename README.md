@@ -20,6 +20,7 @@ treinar_modelo_solo.py   dataset supervisionado, treino, avaliação, export job
 controle_irrigacao.py    controlador PID e Fuzzy: setpoint + sensor -> pulso do atuador
 servidor.py              backend FastAPI entre o ESP32 e o controle
 dashboard.py             painel Streamlit: gráficos, status da bomba, auto/manual
+firmware_esp32/          firmware do nó de campo (Arduino IDE)
 teste_vazamento.py       testes de causalidade das features (roda offline)
 teste_controle.py        testes do controlador com simulador de solo (roda offline)
 teste_servidor.py        testes do backend (roda offline)
@@ -349,6 +350,38 @@ o validador — `node` não está disponível nesta máquina.*
 
 **Toda leitura é alcançável sem o mouse.** Cada gráfico tem sua tabela
 equivalente num expander; o tooltip enriquece, não é a única via.
+
+## Nó ESP32
+
+`firmware_esp32/` fecha o circuito com o hardware: lê o sensor capacitivo v1.2,
+envia a leitura e aciona o relé pelo tempo que a API devolver. Detalhes de
+ligação e calibração no [README do firmware](firmware_esp32/README.md).
+
+Três armadilhas que o firmware trata explicitamente, porque derrubam esse
+projeto em campo:
+
+**ADC2 não funciona com o Wi-Fi ligado.** No ESP32 o ADC2 é compartilhado com
+o rádio — `analogRead()` em GPIO 0, 2, 4, 12–15 ou 25–27 devolve lixo assim que
+a rede sobe. O sintoma engana: funciona perfeitamente até você conectar. O
+sensor tem de ficar no ADC1 (32–36, 39), e o firmware avisa no Serial se não
+estiver.
+
+**A maioria dos módulos de relé aciona em nível baixo**, e entre o reset e o
+`setup()` o pino flutua. Por isso o nível seguro é escrito **antes** de
+`pinMode()` — com `pinMode` primeiro há uma janela em nível indefinido,
+suficiente para o relé clicar e a bomba ligar sozinha no boot.
+
+**`delay()` com o relé ligado é perigoso.** Um `delay(1800000)` prende o laço
+por 30 minutos; se algo travar nesse intervalo, nada desliga a bomba. O tempo
+é contado com `millis()`, `atualizarRele()` roda na primeira linha de todo
+`loop()`, e há três camadas independentes: teto local de 30 min que ignora
+duração absurda vinda da rede, watchdog de 30 s, e contagem que segue correndo
+durante reconexão de Wi-Fi.
+
+O nó confirma o pulso anterior no POST seguinte com o tempo que de fato
+executou — é assim que o servidor descobre uma bomba que não ligou. E leitura
+implausível (ADC travado em 0 ou 4095) **não é enviada**: telemetria falsa
+levaria o controlador a irrigar às cegas.
 
 ## Rigor temporal
 
