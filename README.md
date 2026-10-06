@@ -21,6 +21,7 @@ controle_irrigacao.py    controlador PID e Fuzzy: setpoint + sensor -> pulso do 
 servidor.py              backend FastAPI entre o ESP32 e o controle
 dashboard.py             painel Streamlit: gráficos, status da bomba, auto/manual
 firmware_esp32/          firmware do nó de campo (Arduino IDE)
+no_virtual.py            ESP32 de mentira: roda o sistema inteiro sem hardware
 teste_vazamento.py       testes de causalidade das features (roda offline)
 teste_controle.py        testes do controlador com simulador de solo (roda offline)
 teste_servidor.py        testes do backend (roda offline)
@@ -350,6 +351,51 @@ o validador — `node` não está disponível nesta máquina.*
 
 **Toda leitura é alcançável sem o mouse.** Cada gráfico tem sua tabela
 equivalente num expander; o tooltip enriquece, não é a única via.
+
+## Rodar sem hardware nenhum
+
+Três níveis, do mais isolado ao mais completo.
+
+**1. Só o controlador, sem rede** — já incluso nos testes:
+
+```bash
+python teste_controle.py
+```
+
+Simulador de balanço hídrico com tempo morto de infiltração e drenagem
+irreversível. É o lugar certo para avaliar qualidade de controle, porque
+simula em tempo exato.
+
+**2. O sistema inteiro, com um ESP32 de mentira:**
+
+```bash
+# servidor com as constantes de tempo encolhidas para a demonstração
+IRRIGACAO_LOCKOUT_S=15 IRRIGACAO_TAU_TRANSITO_S=30 \
+IRRIGACAO_PULSO_MAX_S=900 uvicorn servidor:app --port 8000
+
+python no_virtual.py --aceleracao 200 --eto 7 --chuva 0.02
+streamlit run dashboard.py
+```
+
+`no_virtual.py` fala o mesmo protocolo do firmware — POST da leitura, GET do
+comando, confirmação do pulso no ciclo seguinte. **O servidor não sabe que é
+simulação**: roda o mesmo controlador PID e devolve os mesmos comandos. O que
+está sendo exercitado é o sistema de verdade; só o sensor, a bomba e o solo
+são de mentira.
+
+Com `--aceleracao 200` você vê um dia inteiro em alguns minutos, com o painel
+atualizando ao vivo.
+
+> **Ressalva:** o controlador no servidor mede `dt` pelo relógio real, enquanto
+> o solo simulado anda acelerado. O termo derivativo, que é uma taxa por
+> segundo, vê o solo mudando mais rápido que o próprio relógio. A aceleração
+> serve para **ver** o laço funcionando, não para avaliar o controle — para isso
+> use o nível 1, ou `--aceleracao 1`.
+
+**3. O firmware C++ de verdade, sem placa:** o [Wokwi](https://wokwi.com) simula
+um ESP32 com Wi-Fi no navegador. Cole o `.ino`, troque o sensor por um
+potenciômetro (o capacitivo não existe lá) e aponte `API_BASE` para um servidor
+acessível pela internet.
 
 ## Nó ESP32
 

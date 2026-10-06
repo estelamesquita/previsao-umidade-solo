@@ -119,6 +119,13 @@ class Config:
     profundidade_mm: float = _env_float("IRRIGACAO_PROFUNDIDADE_MM", 280.0)
     lamina_diaria_max_mm: float = _env_float("IRRIGACAO_LAMINA_DIA_MM", 15.0)
 
+    # Constantes de tempo do solo. Sao parametro de SITIO (solo arenoso
+    # infiltra em minutos, argiloso em horas) e nao devem viver fixas no
+    # codigo; de quebra, permitem acelerar o tempo numa simulacao.
+    lockout_s: float = _env_float("IRRIGACAO_LOCKOUT_S", 1800.0)
+    tau_transito_s: float = _env_float("IRRIGACAO_TAU_TRANSITO_S", 2700.0)
+    banda_morta_mm: float = _env_float("IRRIGACAO_BANDA_MORTA_MM", 1.5)
+
     fracao_alvo: float = _env_float("IRRIGACAO_FRACAO_ALVO", 0.65)
     confianca_modelo: float = _env_float("IRRIGACAO_CONFIANCA", 0.5)
     ttl_setpoint_s: float = _env_float("IRRIGACAO_TTL_SETPOINT_S", 3600.0)
@@ -321,6 +328,9 @@ class Registro:
             capacidade_campo_mm=cfg.capacidade_campo_mm,
             ponto_murcha_mm=cfg.ponto_murcha_mm,
             lamina_diaria_max_mm=cfg.lamina_diaria_max_mm,
+            banda_morta_mm=cfg.banda_morta_mm,
+            lockout_s=cfg.lockout_s,
+            tau_transito_s=cfg.tau_transito_s,
         )
         self.atuador = Atuador(
             vazao_lph=cfg.vazao_lph, area_m2=cfg.area_m2,
