@@ -21,6 +21,7 @@ Testes — todos offline, sem rede e sem modelo treinado:
 python teste_vazamento.py      # 42 asserções: causalidade das features
 python teste_controle.py       # 71 asserções: controlador + simulador de solo
 python teste_servidor.py       # 88 asserções: backend (requer httpx)
+python teste_persistencia.py   # persistencia SQLite: historico/estado pos-reinicio
 ```
 
 Rodar **um único teste**: os arquivos não usam pytest; são funções chamadas por
@@ -37,6 +38,7 @@ python coleta_open_meteo.py --lat -23.55 --lon -46.63 --dias 30
 python treinar_modelo_solo.py --lat -23.55 --lon -46.63 --anos 3
 python treinar_modelo_solo.py --prever modelos_final/solo_sao_paulo_h24.joblib
 uvicorn servidor:app --port 8000
+IRRIGACAO_DB=irrigacao.db uvicorn servidor:app --port 8000   # com persistencia SQLite
 streamlit run dashboard.py
 python no_virtual.py --aceleracao 200 --eto 7
 arduino-cli compile --fqbn esp32:esp32:esp32 --warnings all firmware_esp32
@@ -193,5 +195,8 @@ Três armadilhas específicas do ESP32, detalhadas em `firmware_esp32/README.md`
   real. Calibrar isso é pré-requisito para uso em campo.
 - O modelo versionado é de esquema `archive`; operação real exige treinar com
   `--fonte forecast`.
-- O histórico do servidor vive em RAM (`deque`), perdido a cada reinício.
+- O histórico do servidor vive em RAM (`deque`), perdido a cada reinício —
+  **a menos que** `IRRIGACAO_DB` aponte para um arquivo SQLite (`persistencia.py`):
+  aí cada leitura é gravada e o histórico/estado são reidratados no boot. Sem a
+  variável, o comportamento é o antigo (estado em JSON, histórico só em RAM).
 - Não há alerta de falha nem proteção contra reservatório vazio.

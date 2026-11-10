@@ -81,6 +81,7 @@ from controle_irrigacao import (
     setpoint_por_fracao_disponivel,
     vwc_para_mm,
 )
+from persistencia import Banco
 
 LOG = logging.getLogger("irrigacao.servidor")
 
@@ -105,6 +106,13 @@ class Config:
         Path(os.getenv("IRRIGACAO_BUNDLE")) if os.getenv("IRRIGACAO_BUNDLE") else None
     )
     estado_path: Path = Path(os.getenv("IRRIGACAO_ESTADO", "estado_servidor.json"))
+    # Banco SQLite opcional. Com IRRIGACAO_DB definido, o historico de leituras
+    # (e o estado de seguranca) passam a sobreviver ao reinicio; sem ele, o
+    # comportamento e o antigo: estado em JSON e historico so em RAM.
+    db_path: Path | None = (
+        Path(os.getenv("IRRIGACAO_DB")) if os.getenv("IRRIGACAO_DB") else None
+    )
+    db_retencao_dias: float = _env_float("IRRIGACAO_DB_RETENCAO_DIAS", 30.0)
 
     # Hidraulica do conjunto (vazao total da zona)
     vazao_lph: float = _env_float("IRRIGACAO_VAZAO_LPH", 400.0)
@@ -300,8 +308,13 @@ class EstadoDispositivo:
     )
 
     def registrar(self, umidade_mm: float, setpoint_mm: float | None,
-                  irrigado_mm: float | None = None) -> None:
-        self.historico.append((time.time(), umidade_mm, setpoint_mm, irrigado_mm))
+                  irrigado_mm: float | None = None,
+                  ) -> tuple[float, float, float | None, float | None]:
+        """Anexa um ponto ao historico e o devolve, para que o chamador
+        possa tambem enfileira-lo no banco com o MESMO carimbo de tempo."""
+        ponto = (time.time(), umidade_mm, setpoint_mm, irrigado_mm)
+        self.historico.append(ponto)
+        return ponto
 
     @property
     def bomba_ligada(self) -> bool:
@@ -517,8 +530,34 @@ async def exigir_api_key(
 registro = Registro(CFG)
 servico_setpoint = ServicoSetpoint(CFG, registro.limites)
 
+# Banco SQLite e fila de gravacao. Ambos None quando IRRIGACAO_DB nao esta
+# definido — nesse caso o servidor cai no modo antigo (JSON + RAM).
+banco: Banco | None = None
+_fila_db: "asyncio.Queue[tuple[str, float, float, float | None, float | None]] | None" = None
+
+
+def _persistir_ponto(device_id: str,
+                     ponto: tuple[float, float, float | None, float | None]) -> None:
+    """Enfileira um ponto para gravacao assincrona. Nunca bloqueia o laco de
+    eventos nem a secao critica de onde e chamado."""
+    if _fila_db is None:
+        return
+    try:
+        _fila_db.put_nowait((device_id, ponto[0], ponto[1], ponto[2], ponto[3]))
+    except asyncio.QueueFull:
+        # Telemetria e sacrificavel; o controle nao. Preferimos perder um
+        # ponto do grafico a travar a requisicao do dispositivo.
+        LOG.warning("fila do banco cheia; leitura de %s nao persistida", device_id)
+
 
 async def _salvar_estado() -> None:
+    if banco is not None:
+        try:
+            await run_in_threadpool(
+                banco.salvar_estado, registro.exportar()["dispositivos"])
+        except Exception as exc:  # noqa: BLE001 — persistir nunca derruba o servidor
+            LOG.warning("nao foi possivel salvar o estado no banco: %s", exc)
+        return
     try:
         tmp = CFG.estado_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(registro.exportar(), indent=2), encoding="utf-8")
@@ -528,6 +567,18 @@ async def _salvar_estado() -> None:
 
 
 async def _carregar_estado() -> None:
+    if banco is not None:
+        dados = await run_in_threadpool(banco.carregar_estado)
+        if dados["dispositivos"]:
+            # Mesma regra do JSON: estado de mais de 24 h nao diz nada sobre a
+            # cota de hoje. O historico, esse, e reidratado de qualquer forma.
+            if time.time() - float(dados.get("salvo_em", 0)) <= 86400:
+                await registro.importar(dados)
+            else:
+                LOG.info("estado do banco tem mais de 24 h; cota ignorada")
+        await _reidratar_historico()
+        return
+
     if not CFG.estado_path.exists():
         return
     try:
@@ -542,6 +593,69 @@ async def _carregar_estado() -> None:
     await registro.importar(dados)
 
 
+async def _reidratar_historico() -> None:
+    """Repoe o `deque` de cada dispositivo com os pontos recentes do banco,
+    para o painel ter serie continua logo apos um reinicio."""
+    assert banco is not None
+    desde = time.time() - CFG.db_retencao_dias * 86400.0
+    for did in await run_in_threadpool(banco.dispositivos_com_historico, desde):
+        pontos = await run_in_threadpool(
+            banco.carregar_historico, did, desde, CFG.historico_max)
+        if not pontos:
+            continue
+        est = await registro.obter(did)
+        est.historico.extend(pontos)
+        LOG.info("historico reidratado para %s (%d pontos)", did, len(pontos))
+
+
+async def _gravador_db() -> None:
+    """Dreno da fila: agrupa os pontos pendentes e os grava em lote, fora do
+    laco de eventos. Poda leituras antigas no maximo uma vez por hora."""
+    assert banco is not None and _fila_db is not None
+    ultima_poda = time.monotonic()
+    while True:
+        lote = [await _fila_db.get()]
+        while len(lote) < 500:
+            try:
+                lote.append(_fila_db.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        try:
+            await run_in_threadpool(banco.gravar_leituras, lote)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("falha ao gravar leituras no banco: %s", exc)
+        finally:
+            for _ in lote:
+                _fila_db.task_done()
+
+        if time.monotonic() - ultima_poda > 3600.0:
+            ultima_poda = time.monotonic()
+            corte = time.time() - CFG.db_retencao_dias * 86400.0
+            try:
+                n = await run_in_threadpool(banco.podar, corte)
+                if n:
+                    LOG.info("poda: %d leituras alem da retencao removidas", n)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("falha ao podar o banco: %s", exc)
+
+
+async def _drenar_fila_db() -> None:
+    """No desligamento: grava o que sobrou na fila antes de fechar o banco."""
+    if banco is None or _fila_db is None:
+        return
+    lote: list[tuple[str, float, float, float | None, float | None]] = []
+    while True:
+        try:
+            lote.append(_fila_db.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    if lote:
+        try:
+            await run_in_threadpool(banco.gravar_leituras, lote)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("falha ao drenar a fila do banco: %s", exc)
+
+
 async def _autosave(intervalo_s: float = 60.0) -> None:
     while True:
         await asyncio.sleep(intervalo_s)
@@ -550,6 +664,7 @@ async def _autosave(intervalo_s: float = 60.0) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global banco, _fila_db
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -565,13 +680,31 @@ async def lifespan(app: FastAPI):
         LOG.info("sem modelo; setpoint fixo em %.0f%% da agua disponivel",
                  CFG.fracao_alvo * 100)
 
+    if CFG.db_path is not None:
+        try:
+            banco = await run_in_threadpool(Banco, CFG.db_path)
+            _fila_db = asyncio.Queue(maxsize=10000)
+        except Exception as exc:  # noqa: BLE001 — sem banco, segue em RAM
+            LOG.warning("nao foi possivel abrir o banco (%s); seguindo em RAM: %s",
+                        CFG.db_path, exc)
+            banco, _fila_db = None, None
+    else:
+        LOG.info("sem IRRIGACAO_DB; estado em JSON e historico so em RAM")
+
     await _carregar_estado()
-    tarefa = asyncio.create_task(_autosave())
+    tarefas = [asyncio.create_task(_autosave())]
+    if banco is not None:
+        tarefas.append(asyncio.create_task(_gravador_db()))
     try:
         yield
     finally:
-        tarefa.cancel()
+        for t in tarefas:
+            t.cancel()
         await _salvar_estado()
+        if banco is not None:
+            await _drenar_fila_db()
+            await run_in_threadpool(banco.close)
+            banco, _fila_db = None, None
 
 
 app = FastAPI(
@@ -647,7 +780,8 @@ async def receber_leitura(leitura: LeituraEntrada) -> LeituraResposta:
                     )
                 est.pendente = None
 
-        est.registrar(umidade_mm, sp.valor_mm)
+        ponto = est.registrar(umidade_mm, sp.valor_mm)
+        _persistir_ponto(est.device_id, ponto)
 
     proximo = (CFG.poll_irrigando_s if est.pendente else CFG.poll_normal_s)
     return LeituraResposta(
@@ -743,7 +877,8 @@ async def obter_comando(device_id: str) -> ComandoResposta:
             emitido_em=time.monotonic(),
         )
         est.irrigacoes += 1
-        est.registrar(est.umidade_mm, sp.valor_mm, decisao.lamina_mm)
+        ponto = est.registrar(est.umidade_mm, sp.valor_mm, decisao.lamina_mm)
+        _persistir_ponto(est.device_id, ponto)
         LOG.info("%s: acionar %.0f s (%.2f mm), comando %s",
                  device_id, decisao.pulso_s, decisao.lamina_mm, cid)
 
@@ -880,7 +1015,8 @@ async def acionar_manual(device_id: str,
         est.controlador._transito_mm += lamina
         est.controlador._t_transito = time.monotonic()
         est.controlador._t_ultima_irrigacao = time.monotonic()
-        est.registrar(est.umidade_mm, sp.valor_mm, lamina)
+        ponto = est.registrar(est.umidade_mm, sp.valor_mm, lamina)
+        _persistir_ponto(est.device_id, ponto)
 
     LOG.info("%s: pulso MANUAL de %.0f s (%.2f mm), comando %s",
              device_id, segundos, lamina, cid)
@@ -925,4 +1061,5 @@ async def health() -> dict[str, Any]:
         "origem_setpoint": sp.origem,
         "modelo_carregado": bool(CFG.bundle and CFG.bundle.exists()),
         "autenticado": CFG.api_key is not None,
+        "banco": banco is not None,
     }
