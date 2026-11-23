@@ -42,3 +42,6 @@ estado_servidor.json
 
 COMMIT_MSG.tmp
 firmware_esp32/build/
+
+# Config da ferramenta Claude Code (nao faz parte do projeto)
+.claude/
